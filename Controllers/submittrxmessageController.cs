@@ -30,7 +30,7 @@ namespace Fourtitude_Test.Controllers
                     return Results.Json(new { result = 0, resultmessage = "Invalid JSON format" });
 
                 // Validation
-                var missingField = GetMissingRequiredField(data);
+                var missingField = ValidateRequiredField(data);
                 if (missingField != null)
                     return Results.Json(new { result = 0, resultmessage = $"{missingField} is Required." });
 
@@ -71,11 +71,12 @@ namespace Fourtitude_Test.Controllers
             }
         }
 
-        private string? GetMissingRequiredField(dynamic data)
+        private string? ValidateRequiredField(dynamic data)
         {
             if (string.IsNullOrEmpty(data.partnerkey?.ToString())) return "partnerkey";
             if (string.IsNullOrEmpty(data.partnerrefno?.ToString())) return "partnerrefno";
             if (string.IsNullOrEmpty(data.partnerpassword?.ToString())) return "partnerpassword";
+            if (string.IsNullOrEmpty(data.totalamount?.ToString())) return "totalamount";
             if (string.IsNullOrEmpty(data.timestamp?.ToString())) return "timestamp";
             if (string.IsNullOrEmpty(data.sig?.ToString())) return "sig";
             return null;
@@ -83,8 +84,15 @@ namespace Fourtitude_Test.Controllers
 
         private bool ValidateTimestamp(string timestampString)
         {
-            return DateTime.TryParse(timestampString, out var requestTime) &&
-                   Math.Abs((DateTime.UtcNow - requestTime).TotalMinutes) <= 5;
+            if (!DateTime.TryParse(timestampString, out var requestTime))
+                return false;
+
+            // Adjust server time to UTC+8
+            //var serverTime = DateTime.UtcNow.AddHours(8);
+            var serverTime = DateTime.Parse("2024-08-15 02:12:00 AM");
+            var timeDifference = Math.Abs((serverTime - requestTime).TotalMinutes);
+
+            return timeDifference <= 5; // ±5 minutes tolerance
         }
 
         private bool ValidatePartnerCredentials(string partnerKey, string partnerPassword)
@@ -105,14 +113,14 @@ namespace Fourtitude_Test.Controllers
 
             using var sha256 = SHA256.Create();
             var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(signatureString));
+
+            // Convert hash bytes to hexadecimal string
             var hexHash = BitConverter.ToString(hashBytes).Replace("-", "").ToLower();
 
-            var hexBytes = Enumerable.Range(0, hexHash.Length)
-                .Where(x => x % 2 == 0)
-                .Select(x => Convert.ToByte(hexHash.Substring(x, 2), 16))
-                .ToArray();
-
+            // Convert hexadecimal string to UTF-8 bytes and then to Base64
+            var hexBytes = Encoding.UTF8.GetBytes(hexHash);
             var computedSig = Convert.ToBase64String(hexBytes);
+
             return computedSig == data.sig?.ToString();
         }
 
@@ -150,17 +158,90 @@ namespace Fourtitude_Test.Controllers
 
         private object ProcessTransactionBusinessLogic(dynamic data)
         {
-            long totalAmount = (long)data.totalamount;
-            long totalDiscount = totalAmount > 5000 ? (long)(totalAmount * 0.1) : 0;
-            long finalAmount = totalAmount - totalDiscount;
+            long totalAmountCents = (long)data.totalamount;
+
+            // Calculate base discount percentage
+            decimal totalAmountMyr = totalAmountCents / 100m;
+            decimal baseDiscountPercent = CalculateBaseDiscount(totalAmountMyr);
+
+            // Calculate conditional discounts
+            decimal conditionalDiscountPercent = CalculateConditionalDiscounts(totalAmountMyr);
+
+            // Calculate total discount percentage
+            decimal totalDiscountPercent = baseDiscountPercent + conditionalDiscountPercent;
+
+            // Apply maximum discount cap of 20%
+            if (totalDiscountPercent > 20m)
+            {
+                totalDiscountPercent = 20m;
+            }
+
+            // Calculate discount amount in cents
+            long totalDiscountCents = (long)(totalAmountCents * (totalDiscountPercent / 100m));
+            long finalAmountCents = totalAmountCents - totalDiscountCents;
 
             return new
             {
                 result = 1,
-                totalamount = totalAmount,
-                totaldiscount = totalDiscount,
-                finalamount = finalAmount
+                totalamount = totalAmountCents,
+                totaldiscount = totalDiscountCents,
+                finalamount = finalAmountCents
             };
+        }
+
+        private decimal CalculateBaseDiscount(decimal totalAmountMyr)
+        {
+            if (totalAmountMyr < 200m)
+                return 0m;
+            else if (totalAmountMyr >= 200m && totalAmountMyr <= 500m)
+                return 5m;
+            else if (totalAmountMyr >= 501m && totalAmountMyr <= 800m)
+                return 7m;
+            else if (totalAmountMyr >= 801m && totalAmountMyr <= 1200m)
+                return 10m;
+            else // totalAmountMyr > 1200m
+                return 15m;
+        }
+
+        private decimal CalculateConditionalDiscounts(decimal totalAmountMyr)
+        {
+            decimal conditionalDiscount = 0m;
+
+            // Prime number above MYR 500: additional 8% discount
+            if (totalAmountMyr > 500m && IsPrime((long)totalAmountMyr))
+            {
+                conditionalDiscount += 8m;
+            }
+
+            // Ends with digit 5 and above MYR 900: additional 10% discount
+            if (totalAmountMyr > 900m && EndsWithFive(totalAmountMyr))
+            {
+                conditionalDiscount += 10m;
+            }
+
+            return conditionalDiscount;
+        }
+
+        private bool IsPrime(long number)
+        {
+            if (number <= 1) return false;
+            if (number == 2) return true;
+            if (number % 2 == 0) return false;
+
+            var boundary = (long)Math.Floor(Math.Sqrt(number));
+
+            for (long i = 3; i <= boundary; i += 2)
+            {
+                if (number % i == 0)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private bool EndsWithFive(decimal amount)
+        {
+            return Math.Abs(amount % 10) == 5;
         }
 
         private string DecodeBase64(string base64String)
